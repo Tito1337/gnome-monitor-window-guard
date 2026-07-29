@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.monitor-window-guard" path="/org/gnome/shell/extensions/monitor-window-guard/">
+    <key name="pin-on-connect" type="b">
+      <default>false</default>
+      <summary>Pin windows on monitor connect</summary>
+      <description>When a monitor is connected, move every window back to the monitor and workspace it was on beforehand, at the same position relative to that monitor. The newly connected screen therefore starts empty.</description>
+    </key>
+    <key name="collect-on-disconnect" type="b">
+      <default>false</default>
+      <summary>Collect orphans on monitor disconnect</summary>
+      <description>When a monitor is disconnected, move the windows that were on it into a single workspace appended at the end, instead of letting them scatter across existing workspaces.</description>
+    </key>
+    <key name="settle-delay-ms" type="i">
+      <default>150</default>
+      <range min="0" max="5000"/>
+      <summary>Settle delay after a monitor change</summary>
+      <description>How long to wait after a monitor change before restoring window positions, giving mutter and other extensions time to finish their own relocation first. Raise this if another extension re-tiles windows after the restore.</description>
+    </key>
+    <key name="max-restore-attempts" type="i">
+      <default>10</default>
+      <range min="1" max="20"/>
+      <summary>How many convergence attempts to make</summary>
+      <description>Mutter applies window moves asynchronously and can drop them, and dynamic-workspaces renumbers workspaces underneath a restore. Rather than assume one pass sticks, the restore re-checks every window against its target and re-applies what did not take, up to this many times. Raise it if the log reports giving up with windows still off target.</description>
+    </key>
+    <key name="ignore-wm-classes" type="as">
+      <default>[]</default>
+      <summary>Window classes to leave alone</summary>
+      <description>Escape hatch for applications that manage their own placement across monitor changes and should never be repositioned. Match against the window's WM_CLASS, e.g. ['Conky'].</description>
+    </key>
+    <key name="debug-log" type="b">
+      <default>true</default>
+      <summary>Log window state to the journal</summary>
+      <description>Log the tracked window state before and after each monitor change. Read with: journalctl --user -f -o cat | grep monitor-window-guard</description>
+    </key>
+  </schema>
+</schemalist>
