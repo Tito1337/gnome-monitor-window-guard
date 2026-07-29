@@ -40,6 +40,10 @@ Built and tested against **GNOME Shell 49 / mutter 17 / Wayland** on Ubuntu 25.1
 - [Troubleshooting](#troubleshooting)
 - [Limitations](#limitations)
 
+> Also in this repo: [**docs/how-it-was-diagnosed.md**](docs/how-it-was-diagnosed.md) — the
+> narrative version, including the wrong turns. Several fixes here look correct, run without
+> error, and do nothing; that write-up is mostly about those.
+
 ---
 
 ## What it does
