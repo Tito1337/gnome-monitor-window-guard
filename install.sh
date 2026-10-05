@@ -20,8 +20,8 @@ if [ ! -d "$SRC" ]; then
 fi
 
 SHELL_MAJOR="$(gnome-shell --version 2>/dev/null | grep -oE '[0-9]+' | head -1 || echo '?')"
-if [ "$SHELL_MAJOR" != "49" ]; then
-    echo "warning: built and tested against GNOME Shell 49; you have $SHELL_MAJOR." >&2
+if [ "$SHELL_MAJOR" != "49" ] && [ "$SHELL_MAJOR" != "50" ]; then
+    echo "warning: supports GNOME Shell 49 and 50; you have $SHELL_MAJOR." >&2
     echo "         It may still work -- add your version to metadata.json shell-version." >&2
 fi
 

@@ -9,7 +9,7 @@
     <key name="collect-on-disconnect" type="b">
       <default>false</default>
       <summary>Collect orphans on monitor disconnect</summary>
-      <description>When a monitor is disconnected, move the windows that were on it into a single workspace appended at the end, instead of letting them scatter across existing workspaces.</description>
+      <description>When a monitor is disconnected, collect its windows onto an empty workspace. Dynamic workspaces may append a new workspace; static workspaces reuse the active workspace if none is empty.</description>
     </key>
     <key name="settle-delay-ms" type="i">
       <default>150</default>

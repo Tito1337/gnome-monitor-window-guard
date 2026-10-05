@@ -17,7 +17,9 @@ This repository is two things:
 2. **A working GNOME Shell extension** that fixes it. Jump to
    [Install](#install).
 
-Built and tested against **GNOME Shell 49 / mutter 17 / Wayland** on Ubuntu 25.10.
+Supports **GNOME Shell 49 / Mutter 17 and GNOME Shell 50 / Mutter 18** on Wayland.
+The original hardware testing used Ubuntu 25.10; GNOME 50 is covered by isolated
+headless testing.
 
 ---
 
@@ -39,6 +41,7 @@ Built and tested against **GNOME Shell 49 / mutter 17 / Wayland** on Ubuntu 25.1
 - [Simpler alternative: just change the setting](#simpler-alternative-just-change-the-setting)
 - [Troubleshooting](#troubleshooting)
 - [Limitations](#limitations)
+- [Regression checks](#regression-checks)
 
 > Also in this repo: [**docs/how-it-was-diagnosed.md**](docs/how-it-was-diagnosed.md) — the
 > narrative version, including the wrong turns. Several fixes here look correct, run without
@@ -50,8 +53,9 @@ Built and tested against **GNOME Shell 49 / mutter 17 / Wayland** on Ubuntu 25.1
 
 - **Plug in** → nothing moves. Every window stays on the monitor and workspace it was
   already on, so the new screen starts empty and you populate it by dragging.
-- **Unplug** → windows that were on the removed screen are collected into a **single new
-  workspace** appended at the end. Every pre-existing workspace is left untouched.
+- **Unplug** → windows from the removed screen are collected onto an empty workspace.
+  Dynamic workspaces may append one; static workspaces keep their count and use the
+  active workspace if none is empty. Windows on surviving screens keep their workspaces.
 
 It does this without changing any GNOME setting and without dictating how you arrange your
 monitors — an external screen can sit on the left, and you can add a third later.
@@ -60,7 +64,7 @@ monitors — an external screen can sit on the left, and you can add a third lat
 
 ## Install
 
-Requires GNOME Shell 49 on Wayland, plus `gjs` and `glib-compile-schemas` (both present on
+Requires GNOME Shell 49 or 50 on Wayland, plus `gjs` and `glib-compile-schemas` (both present on
 a normal GNOME install).
 
 ```bash
@@ -128,7 +132,7 @@ gsettings --schemadir $EXT/schemas list-recursively $SCHEMA
 | Key | Default | Meaning |
 |---|---|---|
 | `pin-on-connect` | `false` | On monitor connect, put windows back on their original monitor and workspace. |
-| `collect-on-disconnect` | `false` | On monitor disconnect, gather that monitor's windows into one new workspace. |
+| `collect-on-disconnect` | `false` | On disconnect, collect windows onto an empty workspace; a full static grid uses the active workspace. |
 | `settle-delay-ms` | `150` | Wait after a monitor change before restoring, letting mutter and other extensions finish first. |
 | `max-restore-attempts` | `10` | How many convergence attempts to make (see [below](#five-things-that-only-show-up-when-you-run-it)). |
 | `ignore-wm-classes` | `[]` | `WM_CLASS` values never to reposition, e.g. `"['Conky']"`. |
@@ -473,10 +477,10 @@ Windows were assigned to workspaces 3 and 2; an emptied workspace was then prune
 ended up on 2 and 1. **Workspace indices are no more stable an identity than monitor
 indices.**
 
-So workspace targets are computed by **rank**: the occupied workspaces are sorted and mapped
+With dynamic workspaces, targets are computed by **rank**: the occupied workspaces are sorted and mapped
 to `0..n-1`, preserving relative order. Under `dynamic-workspaces` the live workspaces are
 exactly "those holding windows" plus one trailing empty, so ranking matches what GNOME
-settles on anyway.
+settles on anyway. With static workspaces, exact workspace numbers and empty gaps are preserved.
 
 ### 4. Mutter sometimes just drops a geometry batch
 
@@ -675,8 +679,8 @@ Both take effect immediately. If `converged after N` reports a number close to y
 raise it — you are converging by luck.
 
 **Windows come back on the right monitor but the wrong workspace.**
-Check the `workspace targets:` line. Because targets are ranked, a gap in your workspaces
-(a window on 0 and another on 3, with 1 and 2 empty) is compacted rather than preserved.
+Check the `workspace targets:` line and `dynamic-workspaces`. Static workspaces preserve
+exact numbers; dynamic workspaces compact gaps (e.g. 0 and 3 become 0 and 1).
 
 **Another extension re-tiles windows after the restore.**
 Raise `settle-delay-ms`. Candidates that keep per-monitor state: `gTile`,
@@ -699,12 +703,12 @@ Find a window's `WM_CLASS` in the `[...]` field of the log lines.
 
 ## Limitations
 
-- **GNOME Shell 49 / mutter 17 only.** The API details above are version-specific. For other
+- **GNOME Shell 49 / Mutter 17 and 50 / Mutter 18.** The API details above are version-specific. For other
   versions, add your version to `metadata.json` `shell-version` and re-check the API with the
   `gjs` snippet before trusting it.
 - **Wayland-oriented.** The queued-operation and stickiness behaviours were characterised on
   Wayland. It is not tested on X11.
-- **Ranked workspaces compact gaps.** See Troubleshooting.
+- **Dynamic workspaces compact gaps.** Static workspaces preserve exact numbers. See Troubleshooting.
 - **Explicitly-stuck windows on a secondary monitor** cannot be distinguished from implicitly
   sticky ones, so a window you deliberately pinned to all workspaces *while it was on the
   external screen* loses that state.
@@ -712,6 +716,16 @@ Find a window's `WM_CLASS` in the `[...]` field of the log lines.
   restore; the cache is keyed by window object, not title, so this is cosmetic only.
 
 ---
+
+## Regression checks
+
+Run `node test/restore.test.mjs` (Node.js 18 or newer) for deterministic checks of the
+actual restore methods: static and dynamic workspace targets, full grids, asynchronous
+orphan restoration, observe-only mode, and interrupted restores. These tests do not
+access your GNOME session.
+
+The headless hotplug rig exercises Mutter with virtual displays. Hardware docking
+and compatibility with other extensions still require testing in the target setup.
 
 ## License
 

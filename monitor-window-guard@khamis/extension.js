@@ -27,6 +27,7 @@
  */
 
 import GLib from 'gi://GLib';
+import Gio from 'gi://Gio';
 import Meta from 'gi://Meta';
 
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
@@ -62,6 +63,7 @@ const MANAGED_TYPES = [
 export default class MonitorWindowGuardExtension extends Extension {
     enable() {
         this._settings = this.getSettings();
+        this._mutterSettings = new Gio.Settings({schema_id: 'org.gnome.mutter'});
 
         // Meta.Window -> cached placement. Plain Map; entries are removed on
         // 'unmanaged' so this cannot keep windows alive past their lifetime.
@@ -79,6 +81,7 @@ export default class MonitorWindowGuardExtension extends Extension {
         // our own move_resize_frame calls overwrite the pre-change state we intend to
         // replay. See _freezeCache() for why this must latch early.
         this._restoring = false;
+        this._restorePending = false;
 
         this._monitors = this._snapshotMonitors();
 
@@ -154,6 +157,7 @@ export default class MonitorWindowGuardExtension extends Extension {
         this._cache.clear();
         this._monitors = null;
         this._settings = null;
+        this._mutterSettings = null;
         this._log('disabled');
     }
 
@@ -171,13 +175,22 @@ export default class MonitorWindowGuardExtension extends Extension {
             this._log('monitors-changing: cache frozen');
         this._restoring = true;
 
+        // A new layout invalidates every index in an in-flight restore plan. Keep the
+        // original cache, but cancel its callbacks and plan again after the new layout.
+        for (const key of ['_settleId', '_phase2Id', '_verifyId']) {
+            if (this[key]) {
+                GLib.Source.remove(this[key]);
+                this[key] = 0;
+            }
+        }
+
         if (this._thawId)
             GLib.Source.remove(this._thawId);
         this._thawId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, FREEZE_WATCHDOG_S, () => {
             this._thawId = 0;
             if (this._restoring && !this._settleId && !this._phase2Id && !this._verifyId) {
                 this._log('WARNING: no monitors-changed followed monitors-changing; thawing cache');
-                this._restoring = false;
+                this._thaw();
                 this._reseed();
             }
             return GLib.SOURCE_REMOVE;
@@ -190,6 +203,7 @@ export default class MonitorWindowGuardExtension extends Extension {
             this._thawId = 0;
         }
         this._restoring = false;
+        this._restorePending = false;
     }
 
     /* ---------------------------------------------------------------- monitors */
@@ -329,8 +343,7 @@ export default class MonitorWindowGuardExtension extends Extension {
     }
 
     /* Record where this window currently is. Called on every geometry change so
-     * that the cache already holds the pre-change state by the time
-     * monitors-changed fires — mutter gives us no reliable "about to change" hook. */
+     * that the cache holds the pre-change state when monitors-changing freezes it. */
     _capture(win) {
         if (this._restoring || !this._monitors)
             return;
@@ -426,7 +439,8 @@ export default class MonitorWindowGuardExtension extends Extension {
         this._log(`monitors-changed: added=[${added.join(', ') || '-'}] ` +
                   `removed=[${removed.join(', ') || '-'}] now=[${newConns.join(', ')}]`);
 
-        if (!added.length && !removed.length) {
+        this._restorePending ||= added.length > 0 || removed.length > 0;
+        if (!this._restorePending) {
             // Resolution or position change only. Nothing to put back, but the cache is
             // frozen and holds offsets against the previous geometry, so thaw and
             // re-record against the new layout instead of leaving it latched.
@@ -486,19 +500,38 @@ export default class MonitorWindowGuardExtension extends Extension {
         let outstanding = 0;
 
         for (const item of plan.survivors) {
-            const {win, entry, monIndex, wsTarget} = item;
+            const {win, entry, monIndex} = item;
+            // Dynamic workspace objects survive renumbering when lower empty
+            // workspaces disappear. Static targets retain their absolute numbers.
+            const wsTarget = item.workspaceTarget ? item.workspaceTarget.index() : item.wsTarget;
             if (!this._isManaged(win))
                 continue;
 
             let monOk, wsOk;
             try {
                 monOk = win.get_monitor() === monIndex;
-                wsOk = wsTarget === null ||
-                       (!win.is_on_all_workspaces() && win.get_workspace()?.index() === wsTarget);
+                wsOk = entry.explicitSticky ? win.is_on_all_workspaces() :
+                    wsTarget === null ||
+                    (!win.is_on_all_workspaces() && (item.workspaceTarget ?
+                        win.get_workspace() === item.workspaceTarget :
+                        win.get_workspace()?.index() === wsTarget));
             } catch {
                 continue; // window vanished
             }
 
+            if (monOk && item.orphan) {
+                try {
+                    const wsm = global.workspace_manager;
+                    const ws = wsTarget === null ? wsm.get_active_workspace() :
+                        wsm.get_workspace_by_index(wsTarget);
+                    if (ws)
+                        this._clampToWorkArea(win, ws, monIndex);
+                } catch (e) {
+                    outstanding++;
+                    this._log(`  attempt ${attempt}: clamping "${entry.title.slice(0, 32)}" failed: ${e.message}`);
+                    continue;
+                }
+            }
             if (monOk && wsOk)
                 continue;
             outstanding++;
@@ -515,17 +548,6 @@ export default class MonitorWindowGuardExtension extends Extension {
             } catch (e) {
                 this._log(`  attempt ${attempt}: "${entry.title.slice(0, 32)}" failed: ${e.message}`);
             }
-        }
-
-        // Orphans only once, on the first attempt: appending their workspace is not
-        // idempotent, and after that they are ordinary members of the survivor check.
-        if (attempt === 1 && plan.orphans.length) {
-            try {
-                this._collectOrphans(plan.orphans, plan.mons);
-            } catch (e) {
-                this._log(`  orphan collection failed: ${e.message}`);
-            }
-            outstanding++;
         }
 
         const maxAttempts = this._settings.get_int('max-restore-attempts');
@@ -593,7 +615,9 @@ export default class MonitorWindowGuardExtension extends Extension {
             return null;
         }
 
-        // Target workspaces by RANK, not by the cached absolute index.
+        const dynamic = this._mutterSettings.get_boolean('dynamic-workspaces');
+
+        // Dynamic workspaces can be renumbered; static workspaces keep their identity.
         //
         // With dynamic-workspaces the live workspaces are exactly "those holding windows"
         // plus one trailing empty, so absolute indices are not a stable identity — they
@@ -604,7 +628,8 @@ export default class MonitorWindowGuardExtension extends Extension {
         if (pin) {
             const occupied = [...new Set(
                 survivors.map(([, e]) => e.wsIndex).filter(i => i !== null))].sort((a, b) => a - b);
-            occupied.forEach((idx, rank) => wsRank.set(idx, rank));
+            occupied.forEach((idx, rank) => wsRank.set(idx, dynamic ? rank :
+                Math.min(idx, global.workspace_manager.get_n_workspaces() - 1)));
             if (occupied.length)
                 this._log(`workspace targets: ${occupied.map(i => `${i}->${wsRank.get(i)}`).join(' ')}`);
         }
@@ -618,12 +643,27 @@ export default class MonitorWindowGuardExtension extends Extension {
                 : wsRank.get(entry.wsIndex),
         })) : [];
 
-        return {
-            mons,
-            survivors: plannedSurvivors,
-            orphans: collect ? orphans : [],
-            workspacesNeeded: wsRank.size,
-        };
+        if (collect && orphans.length) {
+            const wsm = global.workspace_manager;
+            const orphanSet = new Set(orphans.map(([win]) => win));
+            const reserved = new Set(plannedSurvivors.map(item => item.wsTarget));
+            const ws = this._targetWorkspace(wsm, orphanSet, reserved, dynamic);
+            const connector = mons.byIndex.get(mons.primaryIndex);
+            const mon = mons.byConnector.get(connector);
+            this._log(`collecting ${orphans.length} orphan(s) onto workspace index ${ws.index()}`);
+            for (const [win, entry] of orphans) {
+                plannedSurvivors.push({
+                    win,
+                    entry: {...entry, connector},
+                    monIndex: mon.index,
+                    wsTarget: entry.explicitSticky ? null : ws.index(),
+                    workspaceTarget: dynamic && !entry.explicitSticky ? ws : null,
+                    orphan: true,
+                });
+            }
+        }
+
+        return {mons, survivors: plannedSurvivors};
     }
 
     /* Put a window's frame onto the target monitor. Idempotent — the convergence loop
@@ -672,9 +712,16 @@ export default class MonitorWindowGuardExtension extends Extension {
      * implicitly on-all-workspaces this is silently dropped, which is why the convergence
      * loop only calls this after the monitor check passes. */
     _assignWorkspace(win, entry, wsTarget) {
+        if (entry.explicitSticky) {
+            win.stick();
+            return;
+        }
+        if (wsTarget === null || wsTarget < 0)
+            return;
         const wsm = global.workspace_manager;
 
-        while (wsm.get_n_workspaces() <= wsTarget && wsm.get_n_workspaces() < MAX_WORKSPACES)
+        while (this._mutterSettings.get_boolean('dynamic-workspaces') &&
+               wsm.get_n_workspaces() <= wsTarget && wsm.get_n_workspaces() < MAX_WORKSPACES)
             wsm.append_new_workspace(false, global.get_current_time());
 
         if (win.is_on_all_workspaces())
@@ -687,48 +734,22 @@ export default class MonitorWindowGuardExtension extends Extension {
         }
     }
 
-    /* Windows whose monitor is gone: gather them onto one workspace at the end so
-     * that every pre-existing workspace is left untouched. */
-    _collectOrphans(orphans, mons) {
-        const wsm = global.workspace_manager;
-        const primaryIndex = mons.primaryIndex;
-        const orphanSet = new Set(orphans.map(([win]) => win));
-        const ws = this._targetWorkspace(wsm, orphanSet);
-
-        this._log(`collecting ${orphans.length} orphan(s) onto workspace index ${ws.index()}`);
-
-        for (const [win, entry] of orphans) {
-            try {
-                // The move onto the primary monitor already happened in the placement
-                // pass; this is only a safety net. Doing it here and then immediately
-                // assigning a workspace would not work, because the move is queued and
-                // the window stays implicitly on-all-workspaces until it lands.
-                if (win.get_monitor() !== primaryIndex)
-                    win.move_to_monitor(primaryIndex);
-                if (!entry.explicitSticky && win.is_on_all_workspaces())
-                    win.unstick();
-
-                win.change_workspace(ws);
-                this._clampToWorkArea(win, ws, primaryIndex);
-                this._log(`  moved "${entry.title.slice(0, 50)}" (was on ${entry.connector})`);
-            } catch (e) {
-                this._log(`  failed to collect "${entry.title}": ${e.message}`);
-            }
+    /* Prefer an empty workspace that no survivor is about to return to. Dynamic
+     * workspaces may append; a static grid must keep its existing workspace count.
+     * If the grid is full, use the active workspace for disconnected-screen windows. */
+    _targetWorkspace(wsm, excludeSet, reserved, dynamic) {
+        const count = wsm.get_n_workspaces();
+        for (let i = count - 1; i >= (dynamic ? count - 1 : 0); i--) {
+            const ws = wsm.get_workspace_by_index(i);
+            const occupied = ws.list_windows()
+                .some(w => this._isManaged(w) && !excludeSet.has(w) &&
+                           !w.is_on_all_workspaces());
+            if (!reserved.has(i) && !occupied)
+                return ws;
         }
-    }
-
-    /* Reuse the trailing workspace if it is empty, otherwise append one.
-     * Reusing matters because dynamic-workspaces=true auto-prunes surplus trailing
-     * empties, so blindly appending can race against mutter's own cleanup. */
-    _targetWorkspace(wsm, excludeSet) {
-        const last = wsm.get_workspace_by_index(wsm.get_n_workspaces() - 1);
-        if (last) {
-            const occupied = last.list_windows()
-                .some(w => this._isManaged(w) && !excludeSet.has(w));
-            if (!occupied)
-                return last;
-        }
-        return wsm.append_new_workspace(false, global.get_current_time());
+        if (dynamic && count < MAX_WORKSPACES)
+            return wsm.append_new_workspace(false, global.get_current_time());
+        return wsm.get_active_workspace();
     }
 
     _clampToWorkArea(win, ws, monIndex) {
