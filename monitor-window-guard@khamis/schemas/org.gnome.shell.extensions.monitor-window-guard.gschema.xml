@@ -3,8 +3,8 @@
   <schema id="org.gnome.shell.extensions.monitor-window-guard" path="/org/gnome/shell/extensions/monitor-window-guard/">
     <key name="pin-on-connect" type="b">
       <default>false</default>
-      <summary>Pin windows on monitor connect</summary>
-      <description>When a monitor is connected, move every window back to the monitor and workspace it was on beforehand, at the same position relative to that monitor. The newly connected screen therefore starts empty.</description>
+      <summary>Preserve windows across display changes</summary>
+      <description>After monitor hotplug, mode or layout changes, move windows back to their previous monitor and workspace. Restored frames are fitted into the current work area. A newly connected screen starts empty. Changes between mirrored and separate displays, or to the primary display without hotplug, establish a new baseline.</description>
     </key>
     <key name="collect-on-disconnect" type="b">
       <default>false</default>

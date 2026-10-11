@@ -7,7 +7,8 @@ import test from 'node:test';
 const source = readFileSync(new URL('../monitor-window-guard@khamis/extension.js', import.meta.url), 'utf8')
     .replace(/^import .*;\n/gm, '').replace('export default class', 'class');
 
-function fixture({dynamic = false, pin = true, collect = true, count = 8, active = 2} = {}) {
+function fixture({dynamic = false, pin = true, collect = true, count = 8, active = 2,
+    primaryOnly = true} = {}) {
     const windows = [];
     const tasks = new Map();
     const logs = [];
@@ -43,7 +44,7 @@ function fixture({dynamic = false, pin = true, collect = true, count = 8, active
     const guard = new Guard();
     guard._settings = {get_boolean: key => key === 'pin-on-connect' ? pin : collect,
         get_int: key => key === 'max-restore-attempts' ? 3 : 150};
-    guard._mutterSettings = {get_boolean: () => dynamic};
+    guard._mutterSettings = {get_boolean: key => key === 'dynamic-workspaces' ? dynamic : primaryOnly};
     guard._cache = new Map();
     guard._isManaged = w => !w.closed;
     guard._log = msg => logs.push(msg);
@@ -190,10 +191,139 @@ test('a new monitor change cancels stale restore and verification callbacks', ()
 });
 test('a mode-only event after hotplug still restores the original cache', () => {
     const f = fixture(); f.window('eDP-1', 7);
-    f.guard._restorePending = true;
+    f.guard._monitors = {byConnector: new Map([...f.mons.byConnector, ['DP-4', {index: 1}]]),
+        byIndex: new Map([[0, 'eDP-1'], [1, 'DP-4']]), primaryIndex: 0};
+    f.guard._freezeCache(); f.guard._onMonitorsChanged();
     f.guard._freezeCache(); f.guard._onMonitorsChanged();
     assert.notEqual(f.guard._settleId, 0);
     assert.equal(f.guard._restoring, true);
+});
+
+test('a primary change coalesced with hotplug cannot discard the frozen cache', () => {
+    const f = fixture(); const w = f.window('eDP-1', 1);
+    const docked = {byConnector: new Map([['eDP-1', {index: 0}], ['DP-4', {index: 1}]]),
+        byIndex: new Map([[0, 'eDP-1'], [1, 'DP-4']]), primaryIndex: 0};
+    f.guard._snapshotMonitors = () => docked;
+    f.guard._freezeCache(); f.guard._onMonitorsChanged();
+    let reseeded = false;
+    f.guard._reseed = () => {reseeded = true;};
+    f.guard._snapshotMonitors = () => ({...docked, primaryIndex: 1});
+    f.guard._freezeCache(); f.guard._onMonitorsChanged();
+    assert.equal(reseeded, false);
+    assert.equal(f.guard._cache.get(w).connector, 'eDP-1');
+    assert.equal(f.guard._cache.get(w).wsIndex, 1);
+    assert.notEqual(f.guard._settleId, 0);
+    assert.equal(f.guard._restoring, true);
+});
+
+test('a coalesced primary change respects workspaces-only-on-primary', () => {
+    for (const primaryOnly of [true, false]) {
+        const f = fixture({primaryOnly});
+        const w = f.window('eDP-1', 1, {sticky: primaryOnly});
+        const docked = {byConnector: new Map([['eDP-1', {index: 0}], ['DP-4', {index: 1}]]),
+            byIndex: new Map([[0, 'eDP-1'], [1, 'DP-4']]), primaryIndex: 1};
+        const plan = f.guard._buildRestorePlan(docked);
+        assert.equal(plan.survivors[0].wsTarget, primaryOnly ? null : 1);
+        f.guard._converge(plan, 1);
+        assert.equal(f.finished, true);
+        assert.equal(w.assignments, 0);
+        assert(!f.logs.some(s => s.includes('gave up')));
+    }
+});
+
+test('a standalone mode-only change restores a displaced laptop tile before unplug', () => {
+    const f = fixture();
+    const laptop = f.window('eDP-1', 1, {monitor: 1, ws: 0, sticky: true});
+    const external = f.window('DP-4', null, {monitor: 1, ws: 1, sticky: true});
+    const docked = {byConnector: new Map([['eDP-1', {index: 0}], ['DP-4', {index: 1}]]),
+        byIndex: new Map([[0, 'eDP-1'], [1, 'DP-4']]), primaryIndex: 0};
+    f.guard._monitors = docked;
+    f.guard._snapshotMonitors = () => docked;
+    let captures = 0;
+    const methods = Object.getPrototypeOf(f.guard);
+    f.guard._finishRestore = methods._finishRestore;
+    f.guard._reseed = methods._reseed;
+    f.guard._trackWindow = () => {};
+    f.guard._capture = win => {
+        captures++;
+        f.guard._cache.set(win, {...f.guard._cache.get(win),
+            connector: f.guard._monitors.byIndex.get(win.monitor),
+            wsIndex: win.sticky ? null : win.ws});
+    };
+    f.guard._placeOnMonitor = win => {win.monitor = 0; win.sticky = false;};
+    f.guard._freezeCache();
+    f.guard._onMonitorsChanged();
+    assert.equal(captures, 0, 'do not accept transient monitor assignments');
+    assert.notEqual(f.guard._settleId, 0);
+    while (f.tasks.size) f.next(); // restore, verify, thaw, then re-record actual placement
+    assert.equal(captures, 2);
+    assert.equal(f.guard._cache.get(laptop).connector, 'eDP-1');
+    assert.equal(f.guard._cache.get(laptop).wsIndex, 1);
+    assert.equal(laptop.monitor, 0);
+    assert.equal(laptop.ws, 1);
+    assert.equal(external.monitor, 1);
+    assert.equal(external.assignments, 0);
+    const unplug = f.guard._buildRestorePlan(f.mons);
+    assert.equal(unplug.survivors.find(item => item.win === laptop).wsTarget, 1);
+    assert.equal(unplug.survivors.find(item => item.win === laptop).orphan, undefined);
+    assert.equal(unplug.survivors.find(item => item.win === external).orphan, true);
+    // Mutter brings external windows onto the active laptop workspace on unplug.
+    f.guard._monitors = f.mons;
+    external.monitor = 0; external.sticky = false;
+    f.guard._converge(unplug, 1);
+    while (f.tasks.size) f.next();
+    assert.equal(laptop.ws, 1);
+    assert.equal(external.ws, 7);
+});
+
+test('mirror-to-join changes accept the new baseline without replaying an ambiguous connector', () => {
+    const f = fixture();
+    f.guard._monitors = {byConnector: new Map([['eDP-1', {index: 0}], ['DP-4', {index: 0}]]),
+        byIndex: new Map([[0, 'DP-4']]), primaryIndex: 0};
+    const joined = {byConnector: new Map([['eDP-1', {index: 0}], ['DP-4', {index: 1}]]),
+        byIndex: new Map([[0, 'eDP-1'], [1, 'DP-4']]), primaryIndex: 0};
+    f.guard._snapshotMonitors = () => joined;
+    let reseeded = false;
+    f.guard._reseed = () => {reseeded = true;};
+    f.guard._freezeCache(); f.guard._onMonitorsChanged();
+    assert.equal(reseeded, true);
+    assert.equal(f.guard._restoring, false);
+    assert.equal(f.tasks.size, 0);
+});
+
+test('primary display changes accept implicit stickiness as the new baseline', () => {
+    const f = fixture();
+    const byConnector = new Map([['eDP-1', {index: 0}], ['DP-4', {index: 1}]]);
+    const byIndex = new Map([[0, 'eDP-1'], [1, 'DP-4']]);
+    f.guard._monitors = {byConnector, byIndex, primaryIndex: 0};
+    f.guard._snapshotMonitors = () => ({byConnector, byIndex, primaryIndex: 1});
+    const w = f.window('eDP-1', 1, {sticky: true});
+    f.guard._freezeCache(); f.guard._onMonitorsChanged();
+    assert.equal(f.guard._restoring, false);
+    assert.equal(f.tasks.size, 0);
+    assert.equal(w.assignments, 0);
+});
+
+test('a displaced survivor is fitted to the new work area after its monitor move lands', () => {
+    const f = fixture();
+    const w = f.window('eDP-1', 1, {monitor: 1});
+    let clamped = 0;
+    f.guard._clampToWorkArea = win => {assert.equal(win.monitor, 0); clamped++;};
+    f.guard._placeOnMonitor = win => {win.monitor = 0;};
+    f.guard._converge(f.guard._buildRestorePlan(f.mons), 1);
+    assert.equal(clamped, 0);
+    f.next();
+    assert.equal(clamped, 1);
+    assert.equal(f.finished, true);
+});
+
+test('observe-only mode-only changes thaw without moving windows', () => {
+    const f = fixture({pin: false, collect: false});
+    const w = f.window('eDP-1', 1, {ws: 0});
+    f.guard._freezeCache(); f.guard._onMonitorsChanged();
+    while (f.tasks.size) f.next();
+    assert.equal(f.guard._restoring, false);
+    assert.equal(w.assignments, 0);
 });
 
 test('a sticky survivor does not occupy every static workspace', () => {

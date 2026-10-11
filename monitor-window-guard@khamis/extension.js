@@ -439,16 +439,24 @@ export default class MonitorWindowGuardExtension extends Extension {
         this._log(`monitors-changed: added=[${added.join(', ') || '-'}] ` +
                   `removed=[${removed.join(', ') || '-'}] now=[${newConns.join(', ')}]`);
 
+        // A mirrored logical monitor has several connector names but no unique home
+        // connector for its windows. A deliberate primary change also changes which
+        // screen has workspaces. Accept these Settings transitions as a new baseline.
+        const primaryChanged = oldMons.byIndex.get(oldMons.primaryIndex) !==
+            newMons.byIndex.get(newMons.primaryIndex);
+        const mirrored = oldMons.byConnector.size > oldMons.byIndex.size ||
+            newMons.byConnector.size > newMons.byIndex.size;
         this._restorePending ||= added.length > 0 || removed.length > 0;
-        if (!this._restorePending) {
-            // Resolution or position change only. Nothing to put back, but the cache is
-            // frozen and holds offsets against the previous geometry, so thaw and
-            // re-record against the new layout instead of leaving it latched.
-            this._log('no connector set change (mode/position only); nothing to do');
+        if (!this._restorePending && (mirrored || primaryChanged)) {
+            this._log('mirror/primary layout transition; accepting new window placement');
             this._thaw();
             this._reseed();
             return;
         }
+
+        // Even a mode-only change can relocate a tiled window onto another monitor.
+        // Keep its pre-change identity until the normal restore has verified it;
+        // immediately reseeding here would misclassify it as an orphan on unplug.
 
         this._pruneCache();
         this._dumpCache('cached state from BEFORE the change');
@@ -519,7 +527,7 @@ export default class MonitorWindowGuardExtension extends Extension {
                 continue; // window vanished
             }
 
-            if (monOk && item.orphan) {
+            if (monOk && (item.orphan || item.displaced)) {
                 try {
                     const wsm = global.workspace_manager;
                     const ws = wsTarget === null ? wsm.get_active_workspace() :
@@ -541,6 +549,7 @@ export default class MonitorWindowGuardExtension extends Extension {
                     // Monitor first. While mutter thinks the window is on a secondary
                     // monitor it is implicitly on-all-workspaces, and a workspace
                     // assignment on a sticky window is silently dropped.
+                    item.displaced = true;
                     this._placeOnMonitor(win, entry, plan.mons);
                 } else {
                     this._assignWorkspace(win, entry, wsTarget);
@@ -616,6 +625,7 @@ export default class MonitorWindowGuardExtension extends Extension {
         }
 
         const dynamic = this._mutterSettings.get_boolean('dynamic-workspaces');
+        const primaryOnly = this._mutterSettings.get_boolean('workspaces-only-on-primary');
 
         // Dynamic workspaces can be renumbered; static workspaces keep their identity.
         //
@@ -638,7 +648,11 @@ export default class MonitorWindowGuardExtension extends Extension {
             win,
             entry,
             monIndex: mons.byConnector.get(entry.connector).index,
-            wsTarget: entry.explicitSticky || entry.wsIndex === null
+            // A dock can change the primary screen in a follow-up configuration.
+            // Secondary windows then become implicitly sticky and have no workspace
+            // to restore until that connector becomes primary again.
+            wsTarget: entry.explicitSticky || entry.wsIndex === null || (primaryOnly &&
+                mons.byConnector.get(entry.connector).index !== mons.primaryIndex)
                 ? null
                 : wsRank.get(entry.wsIndex),
         })) : [];

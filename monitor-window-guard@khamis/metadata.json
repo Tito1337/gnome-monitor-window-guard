@@ -1,9 +1,9 @@
 {
   "uuid": "monitor-window-guard@khamis",
   "name": "Monitor Window Guard",
-  "description": "Keeps windows where you put them across monitor hotplug. On connect, every window stays on its original monitor and workspace so the new screen starts empty. On disconnect, windows from the removed screen are collected into one workspace while preserving workspace numbers on surviving screens.",
+  "description": "Preserves windows' monitors and workspaces across hotplug, mode and layout changes. A new screen starts empty; disconnected-screen windows can be collected into one workspace. Primary-display and mirror-mode transitions without hotplug establish a new baseline.",
   "shell-version": ["49", "50"],
   "session-modes": ["user", "unlock-dialog"],
   "settings-schema": "org.gnome.shell.extensions.monitor-window-guard",
-  "version-name": "1.6-static-workspaces"
+  "version-name": "1.6-static-workspaces-2"
 }

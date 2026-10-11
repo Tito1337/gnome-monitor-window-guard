@@ -56,6 +56,12 @@ headless testing.
 - **Unplug** → windows from the removed screen are collected onto an empty workspace.
   Dynamic workspaces may append one; static workspaces keep their count and use the
   active workspace if none is empty. Windows on surviving screens keep their workspaces.
+- **Mode or layout change** → preserve each window's monitor and workspace too. A change
+  with the same connectors can still displace a tiled window; accepting that transient
+  placement would make the next unplug collect a laptop window as an external one.
+  Restored frames are fitted into the current work area. Switching between mirrored and
+  separate displays, or changing the primary display without hotplug, accepts the new
+  window placement instead.
 
 It does this without changing any GNOME setting and without dictating how you arrange your
 monitors — an external screen can sit on the left, and you can add a third later.
@@ -131,8 +137,8 @@ gsettings --schemadir $EXT/schemas list-recursively $SCHEMA
 
 | Key | Default | Meaning |
 |---|---|---|
-| `pin-on-connect` | `false` | On monitor connect, put windows back on their original monitor and workspace. |
-| `collect-on-disconnect` | `false` | On disconnect, collect windows onto an empty workspace; a full static grid uses the active workspace. |
+| `pin-on-connect` | `false` | Preserve surviving windows' monitor and workspace through hotplug and ordinary mode/layout changes. Primary-display and mirror-mode transitions without hotplug establish a new baseline. |
+| `collect-on-disconnect` | `false` | Collect disconnected-screen windows onto an empty workspace; a full static grid uses the active workspace. When false, leave those windows where GNOME places them. |
 | `settle-delay-ms` | `150` | Wait after a monitor change before restoring, letting mutter and other extensions finish first. |
 | `max-restore-attempts` | `10` | How many convergence attempts to make (see [below](#five-things-that-only-show-up-when-you-run-it)). |
 | `ignore-wm-classes` | `[]` | `WM_CLASS` values never to reposition, e.g. `"['Conky']"`. |
